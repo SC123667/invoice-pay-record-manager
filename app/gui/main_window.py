@@ -230,7 +230,68 @@ AMOUNT_KEYWORDS = (
     "价款",
     "发票金额",
 )
-_AMOUNT_PATTERN = re.compile(r"-?\d+(?:[.,]\d{1,2})?")
+EXACT_AMOUNT_KEYS = {
+    "amount",
+    "total_amount",
+    "invoice_amount",
+    "payment_amount",
+    "paid_amount",
+    "actual_amount",
+    "total",
+    "金额",
+    "总金额",
+    "合计金额",
+    "发票金额",
+    "价税合计",
+    "价税合计小写",
+    "小写",
+    "小写金额",
+    "小写总额",
+    "支付金额",
+    "转账金额",
+    "付款金额",
+    "实付金额",
+    "实际支付",
+}
+AMOUNT_EXCLUDED_KEYWORDS = (
+    "发票号码",
+    "发票代码",
+    "号码",
+    "代码",
+    "税号",
+    "识别号",
+    "银行账号",
+    "账号",
+    "单号",
+    "订单",
+    "流水",
+    "日期",
+    "时间",
+    "电话",
+    "手机",
+    "车牌",
+    "里程",
+    "数量",
+    "单价",
+    "税率",
+    "税额",
+    "taxamount",
+    "tax",
+    "vat",
+    "不含税",
+)
+AMOUNT_KEY_FIELDS = ("key", "name", "label", "field", "title")
+AMOUNT_VALUE_FIELDS = ("value", "text", "content", "word", "words", "val")
+_MONEY_NUMBER = r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:[.]\d{1,2})?"
+_AMOUNT_PATTERN = re.compile(_MONEY_NUMBER)
+_AMOUNT_LABEL_PATTERN = re.compile(
+    rf"(?:价税合计(?:\s*[（(]?\s*小写\s*[）)]?)?|小写(?:金额|总额)?|"
+    rf"合计金额|发票金额|总金额|实际支付|支付金额|转账金额|付款金额|实付金额|"
+    rf"订单金额|amount|total)"
+    rf"[\s：:，,、（）()\[\]【】A-Za-z\u4e00-\u9fff]{{0,24}}?"
+    rf"(?:¥|￥|RMB|CNY)?\s*({_MONEY_NUMBER})",
+    re.IGNORECASE,
+)
 
 
 def sanitize_folder_name(name: str) -> str:
@@ -2004,15 +2065,81 @@ class MainWindow(tk.Tk):
         self.handle_level3_selection()
         return True
 
-    def _parse_amount_text(self, text: str) -> Optional[float]:
+    @staticmethod
+    def _normalize_amount_key(key: Any) -> str:
+        return (
+            str(key)
+            .strip()
+            .lower()
+            .replace("_", "")
+            .replace("-", "")
+            .replace(" ", "")
+            .replace("（", "")
+            .replace("）", "")
+            .replace("(", "")
+            .replace(")", "")
+        )
+
+    @classmethod
+    def _is_excluded_amount_key(cls, key: Any) -> bool:
+        normalized = cls._normalize_amount_key(key)
+        return any(keyword in normalized for keyword in AMOUNT_EXCLUDED_KEYWORDS)
+
+    @classmethod
+    def _amount_key_weight(cls, key: Any) -> Optional[int]:
+        normalized = cls._normalize_amount_key(key)
+        if not normalized or cls._is_excluded_amount_key(key):
+            return None
+        exact_keys = {cls._normalize_amount_key(item) for item in EXACT_AMOUNT_KEYS}
+        if normalized in exact_keys:
+            return 100
+        if "价税合计" in normalized or "小写" in normalized:
+            return 95
+        if any(cls._normalize_amount_key(item) in normalized for item in AMOUNT_KEYWORDS):
+            return 80
+        return None
+
+    @staticmethod
+    def _coerce_amount_number(raw: str) -> Optional[float]:
+        cleaned = (
+            raw.strip()
+            .replace(",", "")
+            .replace("￥", "")
+            .replace("¥", "")
+            .replace("RMB", "")
+            .replace("CNY", "")
+            .strip()
+        )
+        try:
+            parsed = abs(float(cleaned))
+        except ValueError:
+            return None
+        if parsed <= 0:
+            return None
+        return parsed
+
+    def _parse_amount_text(
+        self,
+        text: str,
+        *,
+        allow_unlabeled: bool = False,
+    ) -> Optional[float]:
         if not text:
             return None
+        label_match = _AMOUNT_LABEL_PATTERN.search(text)
+        if label_match:
+            parsed = self._coerce_amount_number(label_match.group(1))
+            if parsed is not None:
+                return parsed
+        if not allow_unlabeled:
+            return None
+        stripped = text.strip()
+        if not re.fullmatch(rf"(?:¥|￥|RMB|CNY)?\s*{_MONEY_NUMBER}\s*元?", stripped, re.IGNORECASE):
+            return None
         for match in _AMOUNT_PATTERN.finditer(text):
-            candidate = match.group().replace(",", "")
-            try:
-                return float(candidate)
-            except ValueError:
-                continue
+            parsed = self._coerce_amount_number(match.group())
+            if parsed is not None:
+                return parsed
         return None
 
     def _extract_amount_from_payload(self, payload: Mapping[str, Any]) -> Optional[float]:
@@ -2022,21 +2149,41 @@ class MainWindow(tk.Tk):
             nonlocal best
             parsed = None
             if isinstance(value, (int, float)):
-                parsed = float(value)
+                parsed = abs(float(value))
             elif isinstance(value, str):
-                parsed = self._parse_amount_text(value)
-            if parsed is None:
+                parsed = self._parse_amount_text(
+                    value,
+                    allow_unlabeled=weight >= 80,
+                )
+            if parsed is None or parsed <= 0:
                 return
-            if best is None or weight > best[0]:
+            if best is None or weight > best[0] or (
+                weight == best[0] and parsed < best[1]
+            ):
                 best = (weight, parsed)
 
         def walk(obj: Any, weight: int = 1) -> None:
             if obj is None:
                 return
             if isinstance(obj, Mapping):
+                label = next(
+                    (
+                        obj[field]
+                        for field in AMOUNT_KEY_FIELDS
+                        if isinstance(obj.get(field), str)
+                    ),
+                    None,
+                )
+                label_weight = self._amount_key_weight(label) if label else None
+                if label_weight is not None:
+                    for value_field in AMOUNT_VALUE_FIELDS:
+                        if value_field in obj:
+                            consider(obj[value_field], label_weight)
+                            break
                 for key, value in obj.items():
-                    key_text = str(key)
-                    key_weight = weight + 1 if any(k in key_text for k in AMOUNT_KEYWORDS) else weight
+                    key_weight = self._amount_key_weight(key)
+                    if key_weight is None:
+                        key_weight = weight
                     walk(value, key_weight)
                 return
             if isinstance(obj, str):
