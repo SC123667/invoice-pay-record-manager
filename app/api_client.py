@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple, List, cast
 
+from .constants import DEFAULT_SILICONFLOW_MODEL
+
 try:
     import requests
 except ImportError:  # pragma: no cover - handled at runtime
@@ -40,7 +42,7 @@ _KEYWORD_PRIORITY = {"开票日期": 0, "支付时间": 1}
 _KEY_FIELDS = ("key", "name", "label", "field", "title")
 _VALUE_FIELDS = ("value", "text", "content", "word", "words", "val")
 _SILICONFLOW_URL = "https://api.siliconflow.cn/v1/chat/completions"
-_DEFAULT_SF_MODEL = "Qwen/Qwen3-VL-32B-Instruct"
+_DEFAULT_SF_MODEL = DEFAULT_SILICONFLOW_MODEL
 _DEFAULT_SF_PROMPT = (
     "请识别图片中的发票或支付凭证，并严格返回以下JSON（不要包含额外文本）：\n"
     "{\n"

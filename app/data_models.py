@@ -9,6 +9,9 @@ from .constants import (
     DEFAULT_LEVEL3_CATEGORIES,
     DEFAULT_PAYMENT_SOURCE_DIR,
     DEFAULT_RECOGNITION_SOURCE_DIR,
+    DEFAULT_SILICONFLOW_MODEL,
+    LEGACY_DEFAULT_SILICONFLOW_MODELS,
+    RECOMMENDED_SILICONFLOW_VISION_MODELS,
 )
 
 
@@ -40,7 +43,7 @@ class AppConfig:
     api_extra_params: Dict[str, str] = field(default_factory=dict)
     use_siliconflow: bool = False
     siliconflow_token: str | None = None
-    siliconflow_model: str = "Qwen/Qwen3-VL-32B-Instruct"
+    siliconflow_model: str = DEFAULT_SILICONFLOW_MODEL
     siliconflow_prompt: str | None = None
     invoice_source_dir: str | None = DEFAULT_INVOICE_SOURCE_DIR
     payment_source_dir: str | None = DEFAULT_PAYMENT_SOURCE_DIR
@@ -66,7 +69,7 @@ class AppConfig:
         raw_extra = data.get("api_extra_params") or {}
         use_siliconflow = bool(data.get("use_siliconflow", False))
         siliconflow_token = data.get("siliconflow_token")
-        siliconflow_model = data.get("siliconflow_model") or "Qwen/Qwen2.5-VL-72B-Instruct"
+        siliconflow_model = _normalize_siliconflow_model(data.get("siliconflow_model"))
         siliconflow_prompt = data.get("siliconflow_prompt")
         invoice_source_dir = data.get("invoice_source_dir") or DEFAULT_INVOICE_SOURCE_DIR
         payment_source_dir = data.get("payment_source_dir") or DEFAULT_PAYMENT_SOURCE_DIR
@@ -162,13 +165,12 @@ class AppConfig:
             self.payment_source_dir = DEFAULT_PAYMENT_SOURCE_DIR
         if not self.recognition_source_dir:
             self.recognition_source_dir = DEFAULT_RECOGNITION_SOURCE_DIR
-        if self.siliconflow_model not in self.siliconflow_model_history:
-            self.siliconflow_model_history.append(self.siliconflow_model)
-        defaults = {"Qwen/Qwen2.5-VL-72B-Instruct", "Qwen/Qwen3-VL-32B-Instruct"}
-        for item in defaults:
-            if item not in self.siliconflow_model_history:
-                self.siliconflow_model_history.insert(0, item)
-        self.siliconflow_model_history = _unique_preserve_order(self.siliconflow_model_history)
+        self.siliconflow_model = _normalize_siliconflow_model(self.siliconflow_model)
+        self.siliconflow_model_history = _unique_preserve_order(
+            list(RECOMMENDED_SILICONFLOW_VISION_MODELS)
+            + self.siliconflow_model_history
+            + [self.siliconflow_model]
+        )
 
     def add_level2_category(self, name: str) -> bool:
         name = name.strip()
@@ -190,3 +192,10 @@ class AppConfig:
             return
         if normalized not in self.siliconflow_model_history:
             self.siliconflow_model_history.append(normalized)
+
+
+def _normalize_siliconflow_model(value: Any) -> str:
+    model = str(value).strip() if value else ""
+    if not model or model in LEGACY_DEFAULT_SILICONFLOW_MODELS:
+        return DEFAULT_SILICONFLOW_MODEL
+    return model

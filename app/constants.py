@@ -35,7 +35,31 @@ def _detect_default_source_dir() -> str | None:
 DEFAULT_INVOICE_SOURCE_DIR = _detect_default_source_dir()
 DEFAULT_PAYMENT_SOURCE_DIR = DEFAULT_INVOICE_SOURCE_DIR
 DEFAULT_RECOGNITION_SOURCE_DIR = DEFAULT_INVOICE_SOURCE_DIR
+DEFAULT_SILICONFLOW_MODEL = "Qwen/Qwen3.5-397B-A17B"
+LEGACY_DEFAULT_SILICONFLOW_MODELS = (
+    "Qwen/Qwen3-VL-32B-Instruct",
+    "Qwen/Qwen2.5-VL-72B-Instruct",
+)
+RECOMMENDED_SILICONFLOW_VISION_MODELS = (
+    DEFAULT_SILICONFLOW_MODEL,
+    "Qwen/Qwen3.6-35B-A3B",
+    "Qwen/Qwen3.6-27B",
+    "Qwen/Qwen3.5-122B-A10B",
+    "Qwen/Qwen3.5-35B-A3B",
+    "Qwen/Qwen3.5-27B",
+    "Qwen/Qwen3.5-9B",
+    "Qwen/Qwen3.5-4B",
+    "Qwen/Qwen3-VL-235B-A22B-Instruct",
+    "Qwen/Qwen3-VL-235B-A22B-Thinking",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
+    "Qwen/Qwen3-VL-30B-A3B-Thinking",
+    "Qwen/Qwen3-VL-32B-Instruct",
+    "Qwen/Qwen3-VL-32B-Thinking",
+    "Qwen/Qwen3-VL-8B-Instruct",
+    "Qwen/Qwen2.5-VL-32B-Instruct",
+    "Qwen/Qwen2.5-VL-72B-Instruct",
+)
 WINDOW_TITLE = "发票与支付记录管理工具"
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.5.4"
 
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)

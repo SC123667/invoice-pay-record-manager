@@ -84,6 +84,8 @@ export INVOICE_MANAGER_DEFAULT_SOURCE_DIR="/path/to/your/invoice/files"
 - 硅基流动视觉语言模型：适合直接识别图片或由 PDF 转换得到的图片。
 - SimpleTex 风格接口：适合已有 App ID、App Secret 和签名接口的场景。
 
+默认硅基流动模型会优先使用当前推荐的高性能视觉模型 `Qwen/Qwen3.5-397B-A17B`。设置窗口的模型下拉框也内置了 Qwen3.6、Qwen3.5、Qwen3-VL 和 Qwen2.5-VL 系列候选。
+
 默认提示词会要求模型返回 JSON，并优先识别：
 
 - `invoice_date`

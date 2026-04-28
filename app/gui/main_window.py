@@ -29,7 +29,12 @@ from ..api_client import (
     extract_date_from_payload,
 )
 from ..config_manager import ConfigManager
-from ..constants import WINDOW_TITLE
+from ..constants import (
+    DEFAULT_SILICONFLOW_MODEL,
+    LEGACY_DEFAULT_SILICONFLOW_MODELS,
+    RECOMMENDED_SILICONFLOW_VISION_MODELS,
+    WINDOW_TITLE,
+)
 from ..data_models import AppConfig
 from ..encryption import EncryptionError
 from ..regions import REGIONS
@@ -150,8 +155,8 @@ CATEGORY_KEYWORDS = {
     ],
 }
 DEFAULT_CATEGORY_FALLBACK = "其他"
-DEFAULT_SF_MODEL = "Qwen/Qwen3-VL-32B-Instruct"
-LEGACY_DEFAULT_SF_MODEL = "Qwen/Qwen2.5-VL-72B-Instruct"
+DEFAULT_SF_MODEL = DEFAULT_SILICONFLOW_MODEL
+LEGACY_DEFAULT_SF_MODELS = LEGACY_DEFAULT_SILICONFLOW_MODELS
 AMOUNT_KEYWORDS = (
     "金额",
     "价税合计",
@@ -268,14 +273,16 @@ class SettingsWindow(tk.Toplevel):
             self.master.app_config.siliconflow_model
             or DEFAULT_SF_MODEL
         )
+        if current_sf_model in LEGACY_DEFAULT_SF_MODELS:
+            current_sf_model = DEFAULT_SF_MODEL
         self.sf_model_history = list(
             self.master.app_config.siliconflow_model_history or []
         )
-        if current_sf_model not in self.sf_model_history:
-            self.sf_model_history.append(current_sf_model)
-        for recommended in (DEFAULT_SF_MODEL, LEGACY_DEFAULT_SF_MODEL):
-            if recommended not in self.sf_model_history:
-                self.sf_model_history.insert(0, recommended)
+        self.sf_model_history = self._unique_models(
+            list(RECOMMENDED_SILICONFLOW_VISION_MODELS)
+            + self.sf_model_history
+            + [current_sf_model]
+        )
         self.sf_model_var = tk.StringVar(value=current_sf_model)
         self.sf_prompt_var = tk.StringVar(
             value=self.master.app_config.siliconflow_prompt or ""
@@ -394,8 +401,24 @@ class SettingsWindow(tk.Toplevel):
     @staticmethod
     def _likely_vlm_model(name: str) -> bool:
         lowered = name.lower()
-        keywords = ("vl", "vision", "multimodal", "image")
-        return any(keyword in lowered for keyword in keywords)
+        normalized = name.strip()
+        keywords = ("vl", "vision", "multimodal", "image", "qwen3.5", "qwen3.6")
+        return (
+            normalized in RECOMMENDED_SILICONFLOW_VISION_MODELS
+            or any(keyword in lowered for keyword in keywords)
+        )
+
+    @staticmethod
+    def _unique_models(models: Iterable[str]) -> List[str]:
+        result: List[str] = []
+        seen = set()
+        for model in models:
+            normalized = str(model).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+        return result
 
     def save_api_settings(self) -> None:
         app_id = self.app_id_var.get().strip() or None
@@ -430,7 +453,7 @@ class SettingsWindow(tk.Toplevel):
             messagebox.showerror("错误", "启用硅基流动时必须填写API Token", parent=self)
             return
         if not sf_model:
-            sf_model = "Qwen/Qwen2.5-VL-72B-Instruct"
+            sf_model = DEFAULT_SF_MODEL
         if use_siliconflow and not self._likely_vlm_model(sf_model):
             proceed = messagebox.askyesno(
                 "模型确认",
