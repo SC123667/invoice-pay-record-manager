@@ -1,0 +1,4 @@
+requests>=2.31
+tkinterdnd2>=0.4
+pymupdf>=1.24
+
