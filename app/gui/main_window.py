@@ -82,11 +82,17 @@ PAYMENT_TEXT_HINTS: Tuple[Tuple[str, int], ...] = (
     ("交易时间", 4),
     ("支付方式", 5),
     ("交易单号", 5),
+    ("交易订单号", 5),
     ("转账单号", 5),
     ("商户单号", 4),
+    ("商家订单号", 4),
     ("收单机构", 4),
     ("微信支付", 4),
     ("支付宝", 4),
+    ("淘宝账单", 4),
+    ("账单详情", 4),
+    ("全部账单", 3),
+    ("交易成功", 5),
     ("财付通", 4),
     ("扫码付款", 4),
     ("二维码收款", 4),
@@ -298,6 +304,23 @@ _AMOUNT_PATTERN = re.compile(_MONEY_NUMBER)
 _CURRENCY_AMOUNT_PATTERN = re.compile(
     rf"(?:¥|￥|RMB|CNY)\s*({_MONEY_NUMBER})",
     re.IGNORECASE,
+)
+_SIGNED_AMOUNT_LINE_PATTERN = re.compile(
+    rf"(?m)^\s*[-−]\s*({_MONEY_NUMBER})\s*$",
+)
+PAYMENT_AMOUNT_CONTEXT_KEYWORDS = (
+    "账单详情",
+    "全部账单",
+    "淘宝账单",
+    "支付宝",
+    "支付成功",
+    "交易成功",
+    "付款成功",
+    "支付时间",
+    "付款方式",
+    "支付方式",
+    "交易订单号",
+    "商家订单号",
 )
 _AMOUNT_LABEL_PATTERN = re.compile(
     rf"(?:价税合计(?:\s*[（(]?\s*小写\s*[）)]?)?|小写(?:金额|总额)?|"
@@ -2273,6 +2296,17 @@ class MainWindow(tk.Tk):
         ]
         if currency_amounts:
             return max(currency_amounts)
+        if any(keyword in text for keyword in PAYMENT_AMOUNT_CONTEXT_KEYWORDS):
+            signed_amounts = [
+                parsed
+                for parsed in (
+                    self._coerce_amount_number(match.group(1))
+                    for match in _SIGNED_AMOUNT_LINE_PATTERN.finditer(text)
+                )
+                if parsed is not None
+            ]
+            if signed_amounts:
+                return max(signed_amounts)
         if not allow_unlabeled:
             return None
         stripped = text.strip()

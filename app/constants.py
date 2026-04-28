@@ -60,6 +60,6 @@ RECOMMENDED_SILICONFLOW_VISION_MODELS = (
     "Qwen/Qwen2.5-VL-72B-Instruct",
 )
 WINDOW_TITLE = "发票与支付记录管理工具"
-APP_VERSION = "1.5.13"
+APP_VERSION = "1.5.14"
 
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
