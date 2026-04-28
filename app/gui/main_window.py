@@ -210,7 +210,17 @@ CATEGORY_KEYWORDS = {
         "手套",
         "口罩",
         "劳保用品",
+        "塑料制品",
+        "塑胶制品",
+        "塑料件",
     ],
+}
+FORCED_CATEGORY_KEYWORDS = {
+    "五金": (
+        "塑料制品",
+        "塑胶制品",
+        "塑料件",
+    ),
 }
 DEFAULT_CATEGORY_FALLBACK = "其他"
 DEFAULT_SF_MODEL = DEFAULT_SILICONFLOW_MODEL
@@ -2103,10 +2113,15 @@ class MainWindow(tk.Tk):
     def _infer_invoice_category(
         self, payload: Mapping[str, Any], source: Path
     ) -> Optional[str]:
-        """Use the model返回的category字段，不做本地猜测。"""
+        """Use model category, with explicit user-defined keyword overrides."""
 
         if not isinstance(payload, Mapping):
             return None
+
+        payload_text = json.dumps(payload, ensure_ascii=False)
+        for category, keywords in FORCED_CATEGORY_KEYWORDS.items():
+            if any(keyword in payload_text for keyword in keywords):
+                return category
 
         def pick_category(mapping: Mapping[str, Any]) -> Optional[str]:
             value = mapping.get("category")
