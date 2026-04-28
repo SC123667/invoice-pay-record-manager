@@ -44,13 +44,24 @@ from .dialogs import ask_password, ask_text
 INVALID_CHARS = set('<>:"\\|?*')
 INVOICE_TEXT_HINTS: Tuple[Tuple[str, int], ...] = (
     ("发票", 3),
+    ("电子发票", 5),
+    ("数电票", 5),
+    ("普通发票", 4),
+    ("增值税发票", 5),
     ("开票", 3),
+    ("开票日期", 5),
+    ("购买方信息", 4),
+    ("销售方信息", 4),
     ("销方", 2),
     ("购方", 2),
     ("税号", 3),
+    ("纳税人识别号", 4),
     ("价税合计", 2),
+    ("税额", 2),
     ("发票号码", 3),
     ("发票代码", 3),
+    ("行程单", 3),
+    ("报销凭证", 3),
     ("invoice", 3),
     ("vat", 2),
     ("五金", 3),
@@ -59,8 +70,25 @@ INVOICE_TEXT_HINTS: Tuple[Tuple[str, int], ...] = (
 )
 PAYMENT_TEXT_HINTS: Tuple[Tuple[str, int], ...] = (
     ("支付", 3),
+    ("支付成功", 6),
+    ("当前状态", 3),
+    ("付款成功", 6),
+    ("转账成功", 6),
     ("付款", 3),
     ("收款", 3),
+    ("支付时间", 5),
+    ("转账时间", 5),
+    ("交易时间", 4),
+    ("支付方式", 5),
+    ("交易单号", 5),
+    ("转账单号", 5),
+    ("商户单号", 4),
+    ("收单机构", 4),
+    ("微信支付", 4),
+    ("支付宝", 4),
+    ("财付通", 4),
+    ("扫码付款", 4),
+    ("二维码收款", 4),
     ("交易", 2),
     ("流水", 2),
     ("POS", 2),
@@ -70,6 +98,35 @@ PAYMENT_TEXT_HINTS: Tuple[Tuple[str, int], ...] = (
     ("终端", 1),
     ("payment", 3),
     ("receipt", 2),
+)
+INVOICE_DOCUMENT_TYPE_VALUES = {
+    "invoice",
+    "发票",
+    "电子发票",
+    "普通发票",
+    "数电票",
+    "数电普票",
+    "electronic_invoice",
+}
+PAYMENT_DOCUMENT_TYPE_VALUES = {
+    "payment_proof",
+    "payment",
+    "payment_record",
+    "pay_record",
+    "支付凭证",
+    "支付记录",
+    "付款凭证",
+    "付款记录",
+    "转账凭证",
+    "交易记录",
+}
+DOCUMENT_TYPE_KEYS = (
+    "document_type",
+    "doc_type",
+    "document_kind",
+    "type",
+    "票据类型",
+    "凭证类型",
 )
 
 CATEGORY_ORDER = ["加油", "住宿", "过路费", "五金"]
@@ -1328,6 +1385,11 @@ class MainWindow(tk.Tk):
     def _infer_document_type(
         self, payload: Mapping[str, Any], source: Path
     ) -> Tuple[bool, str]:
+        model_type = self._extract_model_document_type(payload)
+        if model_type is not None:
+            is_invoice, evidence = model_type
+            return is_invoice, evidence
+
         invoice_score = 0
         payment_score = 0
         invoice_hits: List[str] = []
@@ -1372,8 +1434,6 @@ class MainWindow(tk.Tk):
         if isinstance(payload, Mapping):
             walk(payload)
 
-        process_text(source.name, base_weight=3)
-
         if invoice_score > payment_score:
             reason = "、".join(invoice_hits[:4])
             return True, reason
@@ -1382,11 +1442,58 @@ class MainWindow(tk.Tk):
             return False, reason
 
         if invoice_score == 0 and payment_score == 0:
-            return True, "未命中明显关键词，默认按发票处理"
+            return True, "正文未命中明显类型关键词，默认按发票处理"
         combined_invoice = "、".join(invoice_hits[:3]) if invoice_hits else "无"
         combined_payment = "、".join(payment_hits[:3]) if payment_hits else "无"
         reason = f"发票特征({combined_invoice}) vs 支付特征({combined_payment})"
         return True, reason
+
+    @staticmethod
+    def _extract_model_document_type(
+        payload: Mapping[str, Any],
+    ) -> Optional[Tuple[bool, str]]:
+        def normalize(value: Any) -> str:
+            return str(value).strip().lower().replace("-", "_").replace(" ", "_")
+
+        def classify(value: Any) -> Optional[Tuple[bool, str]]:
+            normalized = normalize(value)
+            if not normalized:
+                return None
+            invoice_values = {normalize(item) for item in INVOICE_DOCUMENT_TYPE_VALUES}
+            payment_values = {normalize(item) for item in PAYMENT_DOCUMENT_TYPE_VALUES}
+            if normalized in invoice_values:
+                return True, f"模型返回document_type={value}"
+            if normalized in payment_values:
+                return False, f"模型返回document_type={value}"
+            if "invoice" in normalized or "发票" in normalized:
+                return True, f"模型返回document_type={value}"
+            if (
+                "payment" in normalized
+                or "pay_record" in normalized
+                or "支付" in normalized
+                or "付款" in normalized
+                or "转账" in normalized
+            ):
+                return False, f"模型返回document_type={value}"
+            return None
+
+        def inspect_mapping(mapping: Mapping[str, Any]) -> Optional[Tuple[bool, str]]:
+            for key in DOCUMENT_TYPE_KEYS:
+                if key in mapping:
+                    result = classify(mapping[key])
+                    if result:
+                        return result
+            is_invoice = mapping.get("is_invoice")
+            if isinstance(is_invoice, bool):
+                return is_invoice, f"模型返回is_invoice={is_invoice}"
+            return None
+
+        parsed = payload.get("parsed")
+        if isinstance(parsed, Mapping):
+            result = inspect_mapping(parsed)
+            if result:
+                return result
+        return inspect_mapping(payload)
 
     def _infer_invoice_category(
         self, payload: Mapping[str, Any], source: Path
