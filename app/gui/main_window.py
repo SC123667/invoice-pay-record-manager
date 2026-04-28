@@ -219,6 +219,11 @@ AMOUNT_KEYWORDS = (
     "金额",
     "价税合计",
     "合计",
+    "支付金额",
+    "转账金额",
+    "付款金额",
+    "实付金额",
+    "实际支付",
     "total",
     "amount",
     "total_amount",
@@ -1264,6 +1269,7 @@ class MainWindow(tk.Tk):
 
         is_invoice, reason = self._infer_document_type(payload, document)
         doc_label = "发票" if is_invoice else "支付凭证"
+        amount = self._extract_amount_from_payload(payload)
         if auto_confirm and forced_public_card is not None:
             confirmation = forced_public_card
             self.is_public_card_var.set(confirmation)
@@ -1281,6 +1287,8 @@ class MainWindow(tk.Tk):
                 document,
                 is_invoice=is_invoice,
                 mark_public_card=confirmation,
+                document_date=detected_date,
+                amount=amount,
                 auto_range=auto_range,
             )
         except UserCancelledError:
@@ -1303,11 +1311,10 @@ class MainWindow(tk.Tk):
         self.status_var.set(
             f"识别成功，日期为 {detected_date.isoformat()}，判定为{doc_label}{card_note}{reason_note}，已保存 {saved_path.name}"
         )
-        amount = self._extract_amount_from_payload(payload) if is_invoice else None
         if amount is not None:
             card_amount_note = f"，金额 {amount:.2f}"
             self.status_var.set(self.status_var.get() + card_amount_note)
-            if self._batch_running:
+            if self._batch_running and is_invoice:
                 target_category = sanitize_folder_name(self.level3_var.get()) or DEFAULT_CATEGORY_FALLBACK
                 self._record_batch_invoice_amount(target_category, amount)
         return True
@@ -1398,6 +1405,8 @@ class MainWindow(tk.Tk):
         *,
         is_invoice: bool,
         mark_public_card: bool,
+        document_date: Optional[date] = None,
+        amount: Optional[float] = None,
         auto_range: bool = False,
     ) -> Path:
         if not self.ensure_date_path():
@@ -1421,15 +1430,12 @@ class MainWindow(tk.Tk):
             if not range_info:
                 raise UserCancelledError("用户取消了日期范围设置")
             start_date, end_date, location_text = range_info
-        folder_prefix = self._format_date_range_prefix(start_date, end_date)
+        naming_date = document_date or selected_date
+        date_part = naming_date.strftime("%Y%m%d")
         suffix_base = "发票" if is_invoice else "支付凭证"
         suffix = f"{suffix_base}(公务卡)" if mark_public_card else suffix_base
-        name_parts = [folder_prefix]
-        if category_name:
-            name_parts.append(category_name)
-        if location_text:
-            name_parts.append(location_text)
-        stem = f"{''.join(name_parts)}{suffix}"
+        amount_part = self._format_amount_for_filename(amount)
+        stem = sanitize_folder_name(f"{date_part}{category_name}{amount_part}{suffix}")
         extension = "".join(source.suffixes)
         destination = self.current_date_path / f"{stem}{extension}"
         counter = 1
@@ -1438,6 +1444,12 @@ class MainWindow(tk.Tk):
             counter += 1
         shutil.copy2(source, destination)
         return destination
+
+    @staticmethod
+    def _format_amount_for_filename(amount: Optional[float]) -> str:
+        if amount is None:
+            return "未知金额"
+        return f"{abs(amount):.2f}"
 
     def _get_initial_dir(self, kind: str) -> Optional[str]:
         mapping = {
