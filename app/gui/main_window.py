@@ -8,10 +8,10 @@ import json
 import re
 import tempfile
 import threading
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 try:
@@ -581,6 +581,9 @@ class MainWindow(tk.Tk):
         self._batch_saved_records: List[Dict[str, Any]] = []
         self._batch_amount_only_pair_reports: List[str] = []
         self._batch_ambiguous_pair_reports: List[str] = []
+        self._recognition_logs: List[str] = []
+        self._log_window: Optional[tk.Toplevel] = None
+        self._log_text: Optional[tk.Text] = None
         self._debug_payload_path = (
             Path(__file__).resolve().parents[2] / "recognition_debug.json"
         )
@@ -721,7 +724,13 @@ class MainWindow(tk.Tk):
             state="disabled",
         )
         self.stop_batch_btn.grid(row=0, column=8, padx=(12, 0))
-        date_frame.grid_columnconfigure(9, weight=1)
+        self.open_log_btn = ttk.Button(
+            date_frame,
+            text="识别日志",
+            command=self.open_recognition_log,
+        )
+        self.open_log_btn.grid(row=0, column=9, padx=(12, 0))
+        date_frame.grid_columnconfigure(10, weight=1)
 
         upload_frame = ttk.LabelFrame(self, text="上传凭证")
         upload_frame.grid(row=5, column=0, sticky="nwe", padx=4, pady=(8, 4))
@@ -802,6 +811,98 @@ class MainWindow(tk.Tk):
         except (tk.TclError, AttributeError):
             widget.configure(text="当前环境暂不支持拖拽识别", foreground="gray")
             self._drag_supported = False
+
+    def open_recognition_log(self) -> None:
+        if self._log_window is not None and self._log_window.winfo_exists():
+            self._log_window.lift()
+            return
+
+        window = tk.Toplevel(self)
+        window.title("识别日志")
+        window.geometry("880x520")
+        window.minsize(680, 360)
+        window.protocol("WM_DELETE_WINDOW", self._close_log_window)
+
+        toolbar = ttk.Frame(window)
+        toolbar.grid(row=0, column=0, sticky="we", padx=10, pady=(10, 6))
+        ttk.Button(toolbar, text="清空日志", command=self.clear_recognition_log).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(toolbar, text="识别过程会实时追加到下方").grid(
+            row=0, column=1, sticky="w", padx=(12, 0)
+        )
+        toolbar.grid_columnconfigure(2, weight=1)
+
+        log_text = scrolledtext.ScrolledText(
+            window,
+            wrap="word",
+            height=20,
+            state="disabled",
+            font=("Menlo", 12),
+        )
+        log_text.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        window.grid_rowconfigure(1, weight=1)
+        window.grid_columnconfigure(0, weight=1)
+
+        self._log_window = window
+        self._log_text = log_text
+        self._refresh_log_window()
+
+    def _close_log_window(self) -> None:
+        if self._log_window is not None and self._log_window.winfo_exists():
+            self._log_window.destroy()
+        self._log_window = None
+        self._log_text = None
+
+    def clear_recognition_log(self) -> None:
+        self._recognition_logs = []
+        self._refresh_log_window()
+
+    def _append_recognition_log(self, message: str) -> None:
+        if "_recognition_logs" not in self.__dict__:
+            self.__dict__["_recognition_logs"] = []
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        entry = f"[{timestamp}] {message}"
+        self._recognition_logs.append(entry)
+        self._refresh_log_window(append_only=entry)
+
+    def _refresh_log_window(self, append_only: Optional[str] = None) -> None:
+        log_text = self.__dict__.get("_log_text")
+        if log_text is None:
+            return
+        try:
+            log_text.configure(state="normal")
+            if append_only is None:
+                log_text.delete("1.0", tk.END)
+                if self._recognition_logs:
+                    log_text.insert(tk.END, "\n".join(self._recognition_logs) + "\n")
+            else:
+                log_text.insert(tk.END, append_only + "\n")
+            log_text.configure(state="disabled")
+            log_text.see(tk.END)
+        except tk.TclError:
+            self._log_text = None
+
+    def _summarize_payload_for_log(self, payload: Mapping[str, Any]) -> str:
+        summary: Dict[str, Any] = {}
+        document_type = self._extract_model_document_type(payload)
+        if document_type:
+            is_invoice, evidence = document_type
+            summary["document_type"] = "发票" if is_invoice else "支付凭证"
+            summary["document_type_evidence"] = evidence
+        detected_dt = extract_date_from_payload(payload)
+        if detected_dt:
+            summary["date"] = detected_dt.astimezone().date().isoformat()
+        category = self._infer_invoice_category(payload, Path(""))
+        if category:
+            summary["category"] = category
+        amount = self._extract_amount_from_payload(payload)
+        if amount is not None:
+            summary["amount"] = f"{amount:.2f}"
+        if not summary:
+            summary["payload_keys"] = list(payload.keys())[:12]
+        raw = json.dumps(summary, ensure_ascii=False)
+        return raw[:1000] + ("..." if len(raw) > 1000 else "")
 
     def _restore_last_state(self) -> None:
         config = self.app_config
@@ -998,6 +1099,8 @@ class MainWindow(tk.Tk):
         if not file_path:
             return
         document = Path(file_path)
+        self.open_recognition_log()
+        self._append_recognition_log(f"开始单文件识别: {document}")
         try:
             self._run_document_date_detection(document)
         finally:
@@ -1063,6 +1166,12 @@ class MainWindow(tk.Tk):
         self._batch_saved_records = []
         self._batch_amount_only_pair_reports = []
         self._batch_ambiguous_pair_reports = []
+        self._recognition_logs = []
+        self.open_recognition_log()
+        self._append_recognition_log(f"开始批量识别: {folder_path}，共 {len(files)} 个文件")
+        self._append_recognition_log(
+            "公务卡标记: " + ("全部按公务卡" if all_public_card else "全部按非公务卡")
+        )
         self.status_var.set(f"开始批量识别，共 {len(files)} 个文件")
         self._update_state()
         self.after(0, self._process_next_batch_file)
@@ -1075,6 +1184,9 @@ class MainWindow(tk.Tk):
             self.status_var.set(
                 f"批量已停止，已处理 {self._batch_index} / {self._batch_total} 个文件"
             )
+            self._append_recognition_log(
+                f"批量停止: 已处理 {self._batch_index} / {self._batch_total} 个文件"
+            )
             self._finish_batch_processing()
             return
         if self._batch_index >= self._batch_total:
@@ -1085,6 +1197,9 @@ class MainWindow(tk.Tk):
         current_index = self._batch_index + 1
         self.status_var.set(
             f"批量识别 {current_index}/{self._batch_total}: {file_path.name}"
+        )
+        self._append_recognition_log(
+            f"开始识别 {current_index}/{self._batch_total}: {file_path}"
         )
         worker = threading.Thread(
             target=self._recognize_batch_file_worker,
@@ -1123,7 +1238,11 @@ class MainWindow(tk.Tk):
         handled = False
         if error is not None:
             self.status_var.set(f"处理 {file_path.name} 出错: {error}")
+            self._append_recognition_log(f"识别失败: {file_path.name}，错误: {error}")
         elif payload is not None:
+            self._append_recognition_log(
+                f"模型返回摘要: {file_path.name} -> {self._summarize_payload_for_log(payload)}"
+            )
             try:
                 handled = self._finish_document_date_detection(
                     file_path,
@@ -1135,11 +1254,14 @@ class MainWindow(tk.Tk):
                 )
             except Exception as exc:
                 self.status_var.set(f"处理 {file_path.name} 出错: {exc}")
+                self._append_recognition_log(f"保存失败: {file_path.name}，错误: {exc}")
 
         if handled:
             self._batch_success_count += 1
+            self._append_recognition_log(f"处理完成: {file_path.name}")
         else:
             self._batch_skipped_count += 1
+            self._append_recognition_log(f"未保存/跳过: {file_path.name}")
         self._batch_index = max(self._batch_index, index)
         self.after(0, self._process_next_batch_file)
 
@@ -1174,6 +1296,7 @@ class MainWindow(tk.Tk):
             )
         summary = "，".join(summary_parts)
         self.status_var.set(summary)
+        self._append_recognition_log(summary)
         if self._batch_amount_only_pair_reports or self._batch_ambiguous_pair_reports:
             details: List[str] = []
             if self._batch_amount_only_pair_reports:
@@ -1200,21 +1323,29 @@ class MainWindow(tk.Tk):
                 messagebox.showerror("错误", f"未找到可识别的文件: {document}", parent=self)
             else:
                 self.status_var.set(f"未找到可识别的文件: {document.name}")
+            self._append_recognition_log(f"文件不存在，跳过: {document}")
             return False
         status_prefix = f"识别日期中: {document.name}"
         self.status_var.set(status_prefix)
+        self._append_recognition_log(status_prefix)
         self.update_idletasks()
         try:
             payload = self._recognize_document_payload(document)
+            if not auto_confirm:
+                self._append_recognition_log(
+                    f"模型返回摘要: {document.name} -> {self._summarize_payload_for_log(payload)}"
+                )
         except RecognitionAPIError as exc:
             if not auto_confirm:
                 messagebox.showerror("识别失败", str(exc), parent=self)
             self.status_var.set(f"识别失败: {exc}")
+            self._append_recognition_log(f"识别失败: {document.name}，错误: {exc}")
             return False
         except Exception as exc:
             if not auto_confirm:
                 messagebox.showerror("识别失败", f"出现意外错误: {exc}", parent=self)
             self.status_var.set("识别失败，发生未知错误")
+            self._append_recognition_log(f"识别失败: {document.name}，未知错误: {exc}")
             return False
 
         return self._finish_document_date_detection(
@@ -1257,6 +1388,7 @@ class MainWindow(tk.Tk):
             if not auto_confirm:
                 messagebox.showwarning("提示", "未能在识别结果中提取日期信息")
             self.status_var.set("识别完成，但未找到日期信息")
+            self._append_recognition_log(f"未提取到日期: {document.name}")
             return False
         detected_date = detected_dt.astimezone().date()
 
@@ -1276,11 +1408,13 @@ class MainWindow(tk.Tk):
             )
             if confirm_date is None:
                 self.status_var.set("已取消识别流程")
+                self._append_recognition_log(f"用户取消确认日期: {document.name}")
                 return False
             if not confirm_date:
                 self.status_var.set(
                     "识别结果未确认，未创建文件夹。可调整模型后重新识别。"
                 )
+                self._append_recognition_log(f"用户否认识别日期: {document.name}")
                 return False
         if auto_confirm:
             chosen_level3 = (
@@ -1291,12 +1425,23 @@ class MainWindow(tk.Tk):
             target_category = category_override or chosen_level3 or DEFAULT_CATEGORY_FALLBACK
             if not self._ensure_level3_category(target_category, silent=True):
                 self.status_var.set("自动创建类别失败，请检查类别名称")
+                self._append_recognition_log(
+                    f"自动创建类别失败: {document.name}，类别 {target_category}"
+                )
                 return False
+            self._append_recognition_log(
+                f"自动类别: {document.name} -> {target_category}"
+            )
         self._apply_detected_date(detected_date)
 
         is_invoice, reason = self._infer_document_type(payload, document)
         doc_label = "发票" if is_invoice else "支付凭证"
         amount = self._extract_amount_from_payload(payload)
+        amount_text = f"{amount:.2f}" if amount is not None else "未识别"
+        self._append_recognition_log(
+            f"识别结果: {document.name}，日期 {detected_date.isoformat()}，"
+            f"类型 {doc_label}，金额 {amount_text}，依据 {reason or '无'}"
+        )
         if auto_confirm and forced_public_card is not None:
             confirmation = forced_public_card
             self.is_public_card_var.set(confirmation)
@@ -1305,6 +1450,7 @@ class MainWindow(tk.Tk):
             confirmation = self._confirm_public_card(doc_label)
             if confirmation is None:
                 self.status_var.set("已取消保存凭证")
+                self._append_recognition_log(f"用户取消保存: {document.name}")
                 return False
             self.is_public_card_var.set(confirmation)
             self._remember_state()
@@ -1320,6 +1466,7 @@ class MainWindow(tk.Tk):
             )
         except UserCancelledError:
             self.status_var.set("已取消保存凭证")
+            self._append_recognition_log(f"保存取消: {document.name}")
             return False
         except Exception as exc:
             if not auto_confirm:
@@ -1331,6 +1478,7 @@ class MainWindow(tk.Tk):
             self.status_var.set(
                 f"识别成功，日期为 {detected_date.isoformat()}，判定为{doc_label}"
             )
+            self._append_recognition_log(f"保存失败: {document.name}，错误: {exc}")
             return False
 
         card_note = "(公务卡)" if confirmation else ""
@@ -1338,6 +1486,7 @@ class MainWindow(tk.Tk):
         self.status_var.set(
             f"识别成功，日期为 {detected_date.isoformat()}，判定为{doc_label}{card_note}{reason_note}，已保存 {saved_path.name}"
         )
+        self._append_recognition_log(f"已保存: {document.name} -> {saved_path}")
         if self._batch_running:
             self._record_batch_saved_document(
                 saved_path=saved_path,
@@ -1520,7 +1669,9 @@ class MainWindow(tk.Tk):
             if self._amount_pair_key(record.get("amount")) is not None
         ]
         if not records:
+            self._append_recognition_log("最终配对: 没有可用于配对的金额记录")
             return
+        self._append_recognition_log("最终配对: 开始按日期+金额优先配对")
 
         matched: set[int] = set()
         invoice_records = [
@@ -1563,6 +1714,12 @@ class MainWindow(tk.Tk):
                 self._move_payment_record_to_invoice_folder(payment, invoice)
                 matched.add(invoice_index)
                 matched.add(payment_index)
+                self._append_recognition_log(
+                    (
+                        "同日期同金额配对: "
+                        f"{payment['path']} -> {invoice['folder']}"
+                    )
+                )
 
         unmatched_invoices: Dict[int, List[Tuple[int, Dict[str, Any]]]] = {}
         unmatched_payments: Dict[int, List[Tuple[int, Dict[str, Any]]]] = {}
@@ -1598,6 +1755,13 @@ class MainWindow(tk.Tk):
                         f"支付日期 {payment['date'].isoformat()}"
                     )
                 )
+                self._append_recognition_log(
+                    (
+                        "跨日期同金额配对: "
+                        f"发票文件夹 {invoice_folder} <- 支付凭证文件夹 {payment_folder}，"
+                        f"金额 {amount_text}"
+                    )
+                )
             else:
                 invoice_folders = "；".join(
                     sorted({str(record["folder"]) for _, record in invoices})
@@ -1608,6 +1772,13 @@ class MainWindow(tk.Tk):
                 self._batch_ambiguous_pair_reports.append(
                     (
                         f"金额 {amount_text}: 发票文件夹 {invoice_folders}；"
+                        f"支付凭证文件夹 {payment_folders}"
+                    )
+                )
+                self._append_recognition_log(
+                    (
+                        "同金额待确认: "
+                        f"金额 {amount_text}，发票文件夹 {invoice_folders}；"
                         f"支付凭证文件夹 {payment_folders}"
                     )
                 )
@@ -2090,6 +2261,7 @@ class MainWindow(tk.Tk):
             return
         self._batch_stop_requested = True
         self.status_var.set("已请求停止批量，当前文件处理完成后停止")
+        self._append_recognition_log("收到停止批量请求，当前文件处理完成后停止")
 
     def get_root_path_display(self) -> str:
         return self.app_config.root_path or "未设置"
