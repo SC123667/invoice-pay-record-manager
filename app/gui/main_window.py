@@ -578,6 +578,9 @@ class MainWindow(tk.Tk):
         self._batch_skipped_count = 0
         self._batch_stopped_early = False
         self._batch_public_card = False
+        self._batch_saved_records: List[Dict[str, Any]] = []
+        self._batch_amount_only_pair_reports: List[str] = []
+        self._batch_ambiguous_pair_reports: List[str] = []
         self._debug_payload_path = (
             Path(__file__).resolve().parents[2] / "recognition_debug.json"
         )
@@ -1057,6 +1060,9 @@ class MainWindow(tk.Tk):
         self._batch_skipped_count = 0
         self._batch_stopped_early = False
         self._batch_public_card = all_public_card
+        self._batch_saved_records = []
+        self._batch_amount_only_pair_reports = []
+        self._batch_ambiguous_pair_reports = []
         self.status_var.set(f"开始批量识别，共 {len(files)} 个文件")
         self._update_state()
         self.after(0, self._process_next_batch_file)
@@ -1139,6 +1145,8 @@ class MainWindow(tk.Tk):
 
     def _finish_batch_processing(self) -> None:
         self._cleanup_debug_payload()
+        if not self._batch_stopped_early and self._batch_index >= self._batch_total:
+            self._pair_batch_saved_documents()
         self._batch_running = False
         self._batch_stop_requested = False
         self._update_state()
@@ -1156,8 +1164,27 @@ class MainWindow(tk.Tk):
             ]
             summary_parts.append(f"发票类别数 {kind_count}")
             summary_parts.append("金额汇总: " + "；".join(amount_parts))
+        if self._batch_amount_only_pair_reports:
+            summary_parts.append(
+                f"跨日期同金额配对 {len(self._batch_amount_only_pair_reports)} 组"
+            )
+        if self._batch_ambiguous_pair_reports:
+            summary_parts.append(
+                f"同金额待确认 {len(self._batch_ambiguous_pair_reports)} 组"
+            )
         summary = "，".join(summary_parts)
         self.status_var.set(summary)
+        if self._batch_amount_only_pair_reports or self._batch_ambiguous_pair_reports:
+            details: List[str] = []
+            if self._batch_amount_only_pair_reports:
+                details.append("跨日期同金额配对文件夹:")
+                details.extend(self._batch_amount_only_pair_reports)
+            if self._batch_ambiguous_pair_reports:
+                if details:
+                    details.append("")
+                details.append("同金额多对多，需人工确认:")
+                details.extend(self._batch_ambiguous_pair_reports)
+            messagebox.showinfo("批量配对结果", "\n".join(details), parent=self)
 
     def _run_document_date_detection(
         self,
@@ -1311,6 +1338,15 @@ class MainWindow(tk.Tk):
         self.status_var.set(
             f"识别成功，日期为 {detected_date.isoformat()}，判定为{doc_label}{card_note}{reason_note}，已保存 {saved_path.name}"
         )
+        if self._batch_running:
+            self._record_batch_saved_document(
+                saved_path=saved_path,
+                is_invoice=is_invoice,
+                document_date=detected_date,
+                category=sanitize_folder_name(self.level3_var.get())
+                or DEFAULT_CATEGORY_FALLBACK,
+                amount=amount,
+            )
         if amount is not None:
             card_amount_note = f"，金额 {amount:.2f}"
             self.status_var.set(self.status_var.get() + card_amount_note)
@@ -1450,6 +1486,163 @@ class MainWindow(tk.Tk):
         if amount is None:
             return "未知金额"
         return f"{abs(amount):.2f}"
+
+    def _record_batch_saved_document(
+        self,
+        *,
+        saved_path: Path,
+        is_invoice: bool,
+        document_date: date,
+        category: str,
+        amount: Optional[float],
+    ) -> None:
+        self._batch_saved_records.append(
+            {
+                "path": saved_path,
+                "folder": saved_path.parent,
+                "is_invoice": is_invoice,
+                "date": document_date,
+                "category": category,
+                "amount": amount,
+            }
+        )
+
+    @staticmethod
+    def _amount_pair_key(amount: Optional[float]) -> Optional[int]:
+        if amount is None:
+            return None
+        return int(round(abs(amount) * 100))
+
+    def _pair_batch_saved_documents(self) -> None:
+        records = [
+            record
+            for record in self._batch_saved_records
+            if self._amount_pair_key(record.get("amount")) is not None
+        ]
+        if not records:
+            return
+
+        matched: set[int] = set()
+        invoice_records = [
+            (index, record)
+            for index, record in enumerate(records)
+            if bool(record.get("is_invoice"))
+        ]
+        payment_records = [
+            (index, record)
+            for index, record in enumerate(records)
+            if not bool(record.get("is_invoice"))
+        ]
+
+        def amount_key(record: Mapping[str, Any]) -> int:
+            key = self._amount_pair_key(record.get("amount"))
+            if key is None:
+                raise ValueError("缺少金额")
+            return key
+
+        same_date_invoice_map: Dict[
+            Tuple[date, int], List[Tuple[int, Dict[str, Any]]]
+        ] = {}
+        same_date_payment_map: Dict[
+            Tuple[date, int], List[Tuple[int, Dict[str, Any]]]
+        ] = {}
+        for index, record in invoice_records:
+            key = (record["date"], amount_key(record))
+            same_date_invoice_map.setdefault(key, []).append((index, record))
+        for index, record in payment_records:
+            key = (record["date"], amount_key(record))
+            same_date_payment_map.setdefault(key, []).append((index, record))
+
+        for key, invoices in same_date_invoice_map.items():
+            payments = same_date_payment_map.get(key, [])
+            for invoice_item, payment_item in zip(invoices, payments):
+                invoice_index, invoice = invoice_item
+                payment_index, payment = payment_item
+                if invoice_index in matched or payment_index in matched:
+                    continue
+                self._move_payment_record_to_invoice_folder(payment, invoice)
+                matched.add(invoice_index)
+                matched.add(payment_index)
+
+        unmatched_invoices: Dict[int, List[Tuple[int, Dict[str, Any]]]] = {}
+        unmatched_payments: Dict[int, List[Tuple[int, Dict[str, Any]]]] = {}
+        for index, record in invoice_records:
+            if index not in matched:
+                unmatched_invoices.setdefault(amount_key(record), []).append(
+                    (index, record)
+                )
+        for index, record in payment_records:
+            if index not in matched:
+                unmatched_payments.setdefault(amount_key(record), []).append(
+                    (index, record)
+                )
+
+        for amount_cents, invoices in sorted(unmatched_invoices.items()):
+            payments = unmatched_payments.get(amount_cents, [])
+            if not payments:
+                continue
+            amount_text = f"{amount_cents / 100:.2f}"
+            if len(invoices) == 1 and len(payments) == 1:
+                invoice_index, invoice = invoices[0]
+                payment_index, payment = payments[0]
+                invoice_folder = Path(invoice["folder"])
+                payment_folder = Path(payment["folder"])
+                self._move_payment_record_to_invoice_folder(payment, invoice)
+                matched.add(invoice_index)
+                matched.add(payment_index)
+                self._batch_amount_only_pair_reports.append(
+                    (
+                        f"发票文件夹 {invoice_folder} <- 支付凭证文件夹 {payment_folder} | "
+                        f"金额 {amount_text} | "
+                        f"发票日期 {invoice['date'].isoformat()} / "
+                        f"支付日期 {payment['date'].isoformat()}"
+                    )
+                )
+            else:
+                invoice_folders = "；".join(
+                    sorted({str(record["folder"]) for _, record in invoices})
+                )
+                payment_folders = "；".join(
+                    sorted({str(record["folder"]) for _, record in payments})
+                )
+                self._batch_ambiguous_pair_reports.append(
+                    (
+                        f"金额 {amount_text}: 发票文件夹 {invoice_folders}；"
+                        f"支付凭证文件夹 {payment_folders}"
+                    )
+                )
+
+    def _move_payment_record_to_invoice_folder(
+        self,
+        payment: Dict[str, Any],
+        invoice: Mapping[str, Any],
+    ) -> None:
+        payment_path = Path(payment["path"])
+        invoice_folder = Path(invoice["folder"])
+        if payment_path.parent == invoice_folder:
+            return
+        if not payment_path.exists():
+            return
+        invoice_folder.mkdir(parents=True, exist_ok=True)
+        destination = self._unique_destination(invoice_folder, payment_path.name)
+        shutil.move(str(payment_path), str(destination))
+        payment["path"] = destination
+        payment["folder"] = invoice_folder
+
+    @staticmethod
+    def _unique_destination(folder: Path, filename: str) -> Path:
+        destination = folder / filename
+        if not destination.exists():
+            return destination
+        source_name = Path(filename)
+        stem = source_name.stem
+        suffix = "".join(source_name.suffixes)
+        counter = 1
+        while True:
+            candidate = folder / f"{stem}{counter}{suffix}"
+            if not candidate.exists():
+                return candidate
+            counter += 1
 
     def _get_initial_dir(self, kind: str) -> Optional[str]:
         mapping = {
