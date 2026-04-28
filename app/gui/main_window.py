@@ -7,6 +7,7 @@ import calendar
 import json
 import re
 import tempfile
+import threading
 from datetime import date, timedelta
 import tkinter as tk
 from pathlib import Path
@@ -565,6 +566,13 @@ class MainWindow(tk.Tk):
         self._batch_stop_requested = False
         self._batch_running = False
         self._batch_amount_stats: Dict[str, float] = {}
+        self._batch_files: List[Path] = []
+        self._batch_total = 0
+        self._batch_index = 0
+        self._batch_success_count = 0
+        self._batch_skipped_count = 0
+        self._batch_stopped_early = False
+        self._batch_public_card = False
         self._debug_payload_path = (
             Path(__file__).resolve().parents[2] / "recognition_debug.json"
         )
@@ -1037,48 +1045,103 @@ class MainWindow(tk.Tk):
         self._batch_stop_requested = False
         self._batch_running = True
         self._batch_amount_stats = {}
+        self._batch_files = files
+        self._batch_total = len(files)
+        self._batch_index = 0
+        self._batch_success_count = 0
+        self._batch_skipped_count = 0
+        self._batch_stopped_early = False
+        self._batch_public_card = all_public_card
         self.status_var.set(f"开始批量识别，共 {len(files)} 个文件")
         self._update_state()
+        self.after(0, self._process_next_batch_file)
 
-        success_count = 0
-        skipped_count = 0
-        total = len(files)
-        stopped_early = False
+    def _process_next_batch_file(self) -> None:
+        if not self._batch_running:
+            return
+        if self._batch_stop_requested or self._closing:
+            self._batch_stopped_early = True
+            self.status_var.set(
+                f"批量已停止，已处理 {self._batch_index} / {self._batch_total} 个文件"
+            )
+            self._finish_batch_processing()
+            return
+        if self._batch_index >= self._batch_total:
+            self._finish_batch_processing()
+            return
+
+        file_path = self._batch_files[self._batch_index]
+        current_index = self._batch_index + 1
+        self.status_var.set(
+            f"批量识别 {current_index}/{self._batch_total}: {file_path.name}"
+        )
+        worker = threading.Thread(
+            target=self._recognize_batch_file_worker,
+            args=(file_path, current_index),
+            daemon=True,
+        )
+        worker.start()
+
+    def _recognize_batch_file_worker(self, file_path: Path, index: int) -> None:
+        payload: Optional[Mapping[str, Any]] = None
+        error: Optional[BaseException] = None
         try:
-            for index, file_path in enumerate(files, start=1):
-                if self._batch_stop_requested or self._closing:
-                    self.status_var.set(
-                        f"批量已停止，已处理 {index-1} / {total} 个文件"
-                    )
-                    stopped_early = True
-                    break
-                self.status_var.set(f"批量识别 {index}/{total}: {file_path.name}")
-                self.update_idletasks()
-                handled = False
-                try:
-                    handled = self._run_document_date_detection(
-                        file_path,
-                        auto_confirm=True,
-                        forced_public_card=all_public_card,
-                        auto_range=True,
-                        allow_category_override=True,
-                    )
-                except Exception as exc:
-                    self.status_var.set(f"处理 {file_path.name} 出错: {exc}")
-                if handled:
-                    success_count += 1
-                else:
-                    skipped_count += 1
-        finally:
-            self._cleanup_debug_payload()
-            self._batch_running = False
-            self._batch_stop_requested = False
-            self._update_state()
+            if not file_path.exists() or not file_path.is_file():
+                raise FileNotFoundError(f"未找到可识别的文件: {file_path.name}")
+            payload = self._recognize_document_payload(file_path)
+        except BaseException as exc:  # Pass all worker failures back to Tk safely.
+            error = exc
+        try:
+            self.after(
+                0,
+                lambda: self._handle_batch_file_result(file_path, index, payload, error),
+            )
+        except RuntimeError:
+            return
 
-        summary_parts = [f"批量识别完成，成功 {success_count} 个"]
-        if skipped_count:
-            summary_parts.append(f"未保存 {skipped_count} 个")
-        if stopped_early:
+    def _handle_batch_file_result(
+        self,
+        file_path: Path,
+        index: int,
+        payload: Optional[Mapping[str, Any]],
+        error: Optional[BaseException],
+    ) -> None:
+        if not self._batch_running:
+            return
+
+        handled = False
+        if error is not None:
+            self.status_var.set(f"处理 {file_path.name} 出错: {error}")
+        elif payload is not None:
+            try:
+                handled = self._finish_document_date_detection(
+                    file_path,
+                    payload,
+                    auto_confirm=True,
+                    forced_public_card=self._batch_public_card,
+                    auto_range=True,
+                    allow_category_override=True,
+                )
+            except Exception as exc:
+                self.status_var.set(f"处理 {file_path.name} 出错: {exc}")
+
+        if handled:
+            self._batch_success_count += 1
+        else:
+            self._batch_skipped_count += 1
+        self._batch_index = max(self._batch_index, index)
+        self.after(0, self._process_next_batch_file)
+
+    def _finish_batch_processing(self) -> None:
+        self._cleanup_debug_payload()
+        self._batch_running = False
+        self._batch_stop_requested = False
+        self._update_state()
+
+        summary_parts = [f"批量识别完成，成功 {self._batch_success_count} 个"]
+        if self._batch_skipped_count:
+            summary_parts.append(f"未保存 {self._batch_skipped_count} 个")
+        if self._batch_stopped_early:
             summary_parts.append("已中途停止")
         if self._batch_amount_stats:
             kind_count = len(self._batch_amount_stats)
@@ -1110,19 +1173,7 @@ class MainWindow(tk.Tk):
         self.status_var.set(status_prefix)
         self.update_idletasks()
         try:
-            payload = call_recognition_api(
-                endpoint=self.app_config.api_endpoint or "",
-                app_id=self.app_config.api_app_id,
-                app_secret=self.app_config.api_app_secret,
-                file_path=document,
-                token=self.app_config.api_token,
-                data=self.app_config.api_extra_params,
-                use_siliconflow=self.app_config.use_siliconflow,
-                siliconflow_token=self.app_config.siliconflow_token,
-                siliconflow_model=self.app_config.siliconflow_model,
-                siliconflow_prompt=self.app_config.siliconflow_prompt,
-            )
-            self._write_debug_payload(payload)
+            payload = self._recognize_document_payload(document)
         except RecognitionAPIError as exc:
             if not auto_confirm:
                 messagebox.showerror("识别失败", str(exc), parent=self)
@@ -1134,6 +1185,41 @@ class MainWindow(tk.Tk):
             self.status_var.set("识别失败，发生未知错误")
             return False
 
+        return self._finish_document_date_detection(
+            document,
+            payload,
+            auto_confirm=auto_confirm,
+            forced_public_card=forced_public_card,
+            auto_range=auto_range,
+            allow_category_override=allow_category_override,
+        )
+
+    def _recognize_document_payload(self, document: Path) -> Mapping[str, Any]:
+        payload = call_recognition_api(
+            endpoint=self.app_config.api_endpoint or "",
+            app_id=self.app_config.api_app_id,
+            app_secret=self.app_config.api_app_secret,
+            file_path=document,
+            token=self.app_config.api_token,
+            data=self.app_config.api_extra_params,
+            use_siliconflow=self.app_config.use_siliconflow,
+            siliconflow_token=self.app_config.siliconflow_token,
+            siliconflow_model=self.app_config.siliconflow_model,
+            siliconflow_prompt=self.app_config.siliconflow_prompt,
+        )
+        self._write_debug_payload(payload)
+        return payload
+
+    def _finish_document_date_detection(
+        self,
+        document: Path,
+        payload: Mapping[str, Any],
+        *,
+        auto_confirm: bool = False,
+        forced_public_card: Optional[bool] = None,
+        auto_range: bool = False,
+        allow_category_override: bool = False,
+    ) -> bool:
         detected_dt = extract_date_from_payload(payload)
         if not detected_dt:
             if not auto_confirm:
