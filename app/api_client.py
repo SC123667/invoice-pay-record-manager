@@ -438,7 +438,7 @@ def _render_pdf_first_page(path: Path) -> bytes:
 
     try:
         page = document.load_page(0)
-        pix = page.get_pixmap(alpha=False)
+        pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
         image_bytes = pix.tobytes("png")
     except RuntimeError as exc:
         raise RecognitionAPIError("无法渲染PDF页面为图片") from exc

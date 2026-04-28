@@ -293,7 +293,12 @@ AMOUNT_EXCLUDED_KEYWORDS = (
 AMOUNT_KEY_FIELDS = ("key", "name", "label", "field", "title")
 AMOUNT_VALUE_FIELDS = ("value", "text", "content", "word", "words", "val")
 _MONEY_NUMBER = r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:[.]\d{1,2})?"
+MAX_REASONABLE_AMOUNT = 10_000_000.0
 _AMOUNT_PATTERN = re.compile(_MONEY_NUMBER)
+_CURRENCY_AMOUNT_PATTERN = re.compile(
+    rf"(?:¥|￥|RMB|CNY)\s*({_MONEY_NUMBER})",
+    re.IGNORECASE,
+)
 _AMOUNT_LABEL_PATTERN = re.compile(
     rf"(?:价税合计(?:\s*[（(]?\s*小写\s*[）)]?)?|小写(?:金额|总额)?|"
     rf"合计金额|发票金额|总金额|实际支付|支付金额|转账金额|付款金额|实付金额|"
@@ -1492,8 +1497,44 @@ class MainWindow(tk.Tk):
             siliconflow_model=self.app_config.siliconflow_model,
             siliconflow_prompt=self.app_config.siliconflow_prompt,
         )
+        payload = self._add_local_pdf_text_payload(document, payload)
         self._write_debug_payload(payload)
         return payload
+
+    def _add_local_pdf_text_payload(
+        self,
+        document: Path,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        if document.suffix.lower() != ".pdf":
+            return payload
+        text = self._extract_local_pdf_text(document)
+        if not text:
+            return payload
+        enriched: Dict[str, Any] = dict(payload)
+        enriched["_local_pdf_text"] = text
+        return enriched
+
+    @staticmethod
+    def _extract_local_pdf_text(document: Path) -> Optional[str]:
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            return None
+        try:
+            pdf = fitz.open(document)
+        except RuntimeError:
+            return None
+        try:
+            parts = []
+            for page in pdf:
+                page_text = page.get_text("text").strip()
+                if page_text:
+                    parts.append(page_text)
+        finally:
+            pdf.close()
+        text = "\n".join(parts).strip()
+        return text or None
 
     def _finish_document_date_detection(
         self,
@@ -1545,12 +1586,7 @@ class MainWindow(tk.Tk):
                 )
                 return False
         if auto_confirm:
-            chosen_level3 = (
-                self.level3_var.get()
-                if (self.current_level3_path and self.level3_var.get())
-                else None
-            )
-            target_category = category_override or chosen_level3 or DEFAULT_CATEGORY_FALLBACK
+            target_category = category_override or DEFAULT_CATEGORY_FALLBACK
             if not self._ensure_level3_category(target_category, silent=True):
                 self.status_var.set("自动创建类别失败，请检查类别名称")
                 self._append_recognition_log(
@@ -2211,7 +2247,7 @@ class MainWindow(tk.Tk):
             parsed = abs(float(cleaned))
         except ValueError:
             return None
-        if parsed <= 0:
+        if parsed <= 0 or parsed > MAX_REASONABLE_AMOUNT:
             return None
         return parsed
 
@@ -2223,11 +2259,20 @@ class MainWindow(tk.Tk):
     ) -> Optional[float]:
         if not text:
             return None
-        label_match = _AMOUNT_LABEL_PATTERN.search(text)
-        if label_match:
+        for label_match in _AMOUNT_LABEL_PATTERN.finditer(text):
             parsed = self._coerce_amount_number(label_match.group(1))
             if parsed is not None:
                 return parsed
+        currency_amounts = [
+            parsed
+            for parsed in (
+                self._coerce_amount_number(match.group(1))
+                for match in _CURRENCY_AMOUNT_PATTERN.finditer(text)
+            )
+            if parsed is not None
+        ]
+        if currency_amounts:
+            return max(currency_amounts)
         if not allow_unlabeled:
             return None
         stripped = text.strip()
