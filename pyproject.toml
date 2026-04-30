@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "invoice-pay-record-manager"
-version = "1.5.14"
+version = "1.5.15"
 description = "A local Python desktop app for organizing invoices, payment proofs, OCR dates, categories, and expense records."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -40,7 +40,9 @@ classifiers = [
 dependencies = [
   "requests>=2.31",
   "tkinterdnd2>=0.4",
-  "pymupdf>=1.24"
+  "pymupdf>=1.24",
+  "paddleocr>=3.0.0",
+  "paddlepaddle>=3.0.0"
 ]
 
 [project.urls]

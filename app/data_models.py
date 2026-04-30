@@ -41,6 +41,7 @@ class AppConfig:
     api_endpoint: str | None = None
     api_token: str | None = None
     api_extra_params: Dict[str, str] = field(default_factory=dict)
+    use_local_ocr: bool = True
     use_siliconflow: bool = False
     siliconflow_token: str | None = None
     siliconflow_model: str = DEFAULT_SILICONFLOW_MODEL
@@ -67,6 +68,7 @@ class AppConfig:
         api_endpoint = data.get("api_endpoint")
         api_token = data.get("api_token")
         raw_extra = data.get("api_extra_params") or {}
+        use_local_ocr = bool(data.get("use_local_ocr", True))
         use_siliconflow = bool(data.get("use_siliconflow", False))
         siliconflow_token = data.get("siliconflow_token")
         siliconflow_model = _normalize_siliconflow_model(data.get("siliconflow_model"))
@@ -103,6 +105,7 @@ class AppConfig:
             api_endpoint=api_endpoint,
             api_token=api_token,
             api_extra_params=extra_params,
+            use_local_ocr=use_local_ocr,
             use_siliconflow=use_siliconflow,
             siliconflow_token=siliconflow_token,
             siliconflow_model=siliconflow_model,
@@ -132,6 +135,7 @@ class AppConfig:
             "api_endpoint": self.api_endpoint,
             "api_token": self.api_token,
             "api_extra_params": self.api_extra_params,
+            "use_local_ocr": self.use_local_ocr,
             "use_siliconflow": self.use_siliconflow,
             "siliconflow_token": self.siliconflow_token,
             "siliconflow_model": self.siliconflow_model,

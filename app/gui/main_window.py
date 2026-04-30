@@ -38,6 +38,7 @@ from ..constants import (
 )
 from ..data_models import AppConfig
 from ..encryption import EncryptionError
+from ..local_ocr import recognize_local_document
 from ..regions import REGIONS
 from .dialogs import ask_password, ask_text
 
@@ -427,6 +428,9 @@ class SettingsWindow(tk.Toplevel):
             else ""
         )
         self.extra_params_var = tk.StringVar(value=extra_text)
+        self.local_ocr_enabled_var = tk.BooleanVar(
+            value=bool(self.master.app_config.use_local_ocr)
+        )
         self.sf_enabled_var = tk.BooleanVar(value=bool(self.master.app_config.use_siliconflow))
         self.sf_token_var = tk.StringVar(
             value=self.master.app_config.siliconflow_token or ""
@@ -475,8 +479,14 @@ class SettingsWindow(tk.Toplevel):
             row=4, column=1, sticky="we", pady=(4, 0)
         )
 
+        ttk.Checkbutton(
+            api_frame,
+            text="优先使用本地 OCR，失败时再用云端",
+            variable=self.local_ocr_enabled_var,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
         ttk.Button(api_frame, text="保存识别设置", command=self.save_api_settings).grid(
-            row=5, column=1, sticky="e", pady=(8, 0)
+            row=6, column=1, sticky="e", pady=(8, 0)
         )
         api_frame.grid_columnconfigure(1, weight=1)
 
@@ -608,6 +618,7 @@ class SettingsWindow(tk.Toplevel):
             extra_params = {}
 
         use_siliconflow = self.sf_enabled_var.get()
+        use_local_ocr = self.local_ocr_enabled_var.get()
         sf_token = self.sf_token_var.get().strip() or None
         sf_model = self.sf_model_var.get().strip() or DEFAULT_SF_MODEL
         sf_prompt = self.sf_prompt_var.get().strip() or None
@@ -642,6 +653,7 @@ class SettingsWindow(tk.Toplevel):
         self.master.app_config.recognition_source_dir = (
             self.recognition_dir_var.get().strip() or None
         )
+        self.master.app_config.use_local_ocr = use_local_ocr
         self.master.app_config.use_siliconflow = use_siliconflow
         self.master.app_config.siliconflow_token = sf_token
         self.master.app_config.siliconflow_model = sf_model
@@ -1029,6 +1041,14 @@ class MainWindow(tk.Tk):
         amount = self._extract_amount_from_payload(payload)
         if amount is not None:
             summary["amount"] = f"{amount:.2f}"
+        local_info = payload.get("_local_ocr")
+        if isinstance(local_info, Mapping):
+            engine = local_info.get("engine")
+            reason = local_info.get("reason")
+            if engine:
+                summary["local_ocr"] = engine
+            if reason:
+                summary["local_ocr_reason"] = reason
         if not summary:
             summary["payload_keys"] = list(payload.keys())[:12]
         raw = json.dumps(summary, ensure_ascii=False)
@@ -1508,6 +1528,18 @@ class MainWindow(tk.Tk):
         )
 
     def _recognize_document_payload(self, document: Path) -> Mapping[str, Any]:
+        local_result = None
+        if self.app_config.use_local_ocr:
+            local_result = recognize_local_document(document)
+            if local_result.usable:
+                payload = local_result.payload
+                self._write_debug_payload(payload)
+                return payload
+
+        if not self._has_cloud_credentials():
+            reason = local_result.reason if local_result else "未启用本地 OCR"
+            raise RecognitionAPIError(f"{reason}，且未配置云端识别接口")
+
         payload = call_recognition_api(
             endpoint=self.app_config.api_endpoint or "",
             app_id=self.app_config.api_app_id,
@@ -1520,9 +1552,33 @@ class MainWindow(tk.Tk):
             siliconflow_model=self.app_config.siliconflow_model,
             siliconflow_prompt=self.app_config.siliconflow_prompt,
         )
-        payload = self._add_local_pdf_text_payload(document, payload)
+        payload = self._merge_local_recognition_payload(document, payload, local_result)
         self._write_debug_payload(payload)
         return payload
+
+    def _merge_local_recognition_payload(
+        self,
+        document: Path,
+        payload: Mapping[str, Any],
+        local_result: Any,
+    ) -> Mapping[str, Any]:
+        enriched = dict(self._add_local_pdf_text_payload(document, payload))
+        if not local_result or not local_result.text:
+            return enriched
+
+        local_payload = local_result.payload
+        local_info = local_payload.get("_local_ocr")
+        if isinstance(local_info, Mapping):
+            enriched["_local_ocr"] = dict(local_info)
+
+        local_parsed = local_payload.get("parsed")
+        if isinstance(local_parsed, Mapping):
+            parsed = enriched.get("parsed")
+            if isinstance(parsed, Mapping):
+                enriched["_local_ocr_parsed"] = dict(local_parsed)
+            else:
+                enriched["parsed"] = dict(local_parsed)
+        return enriched
 
     def _add_local_pdf_text_payload(
         self,
@@ -2195,6 +2251,12 @@ class MainWindow(tk.Tk):
             if cat:
                 return cat
 
+        local_parsed = payload.get("_local_ocr_parsed")
+        if isinstance(local_parsed, Mapping):
+            cat = pick_category(local_parsed)
+            if cat:
+                return cat
+
         cat = pick_category(payload)
         if cat:
             return cat
@@ -2413,6 +2475,9 @@ class MainWindow(tk.Tk):
             self.year_combo["values"] = current_values
 
     def _has_api_credentials(self) -> bool:
+        return bool(self.app_config.use_local_ocr or self._has_cloud_credentials())
+
+    def _has_cloud_credentials(self) -> bool:
         if self.app_config.use_siliconflow:
             return bool(self.app_config.siliconflow_token)
         has_signed = (
