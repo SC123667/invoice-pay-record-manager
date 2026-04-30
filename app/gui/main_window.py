@@ -44,6 +44,16 @@ from .dialogs import ask_password, ask_text
 
 
 INVALID_CHARS = set('<>:"\\|?*')
+RECOGNITION_FILE_SUFFIXES = {
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
 INVOICE_TEXT_HINTS: Tuple[Tuple[str, int], ...] = (
     ("发票", 3),
     ("电子发票", 5),
@@ -1278,11 +1288,16 @@ class MainWindow(tk.Tk):
             return
         folder_path = Path(folder_selected)
         try:
+            all_files = [
+                path
+                for path in folder_path.rglob("*")
+                if path.is_file()
+            ]
             files = sorted(
                 (
                     path
-                    for path in folder_path.rglob("*")
-                    if path.is_file()
+                    for path in all_files
+                    if self._is_recognizable_file(path)
                 ),
                 key=lambda path: (path.parent.relative_to(folder_path).as_posix(), path.name.lower()),
             )
@@ -1323,6 +1338,12 @@ class MainWindow(tk.Tk):
             f"===== 批量识别开始: 共 {len(files)} 个文件 =====",
             "header",
         )
+        ignored_count = len(all_files) - len(files)
+        if ignored_count:
+            self._append_recognition_log(
+                f"已过滤隐藏文件或非票据文件: {ignored_count} 个",
+                "warning",
+            )
         self._append_recognition_log(f"来源文件夹: {folder_path}", "detail")
         self._append_recognition_log(
             "公务卡标记: " + ("全部按公务卡" if all_public_card else "全部按非公务卡"),
@@ -1540,18 +1561,25 @@ class MainWindow(tk.Tk):
             reason = local_result.reason if local_result else "未启用本地 OCR"
             raise RecognitionAPIError(f"{reason}，且未配置云端识别接口")
 
-        payload = call_recognition_api(
-            endpoint=self.app_config.api_endpoint or "",
-            app_id=self.app_config.api_app_id,
-            app_secret=self.app_config.api_app_secret,
-            file_path=document,
-            token=self.app_config.api_token,
-            data=self.app_config.api_extra_params,
-            use_siliconflow=self.app_config.use_siliconflow,
-            siliconflow_token=self.app_config.siliconflow_token,
-            siliconflow_model=self.app_config.siliconflow_model,
-            siliconflow_prompt=self.app_config.siliconflow_prompt,
-        )
+        try:
+            payload = call_recognition_api(
+                endpoint=self.app_config.api_endpoint or "",
+                app_id=self.app_config.api_app_id,
+                app_secret=self.app_config.api_app_secret,
+                file_path=document,
+                token=self.app_config.api_token,
+                data=self.app_config.api_extra_params,
+                use_siliconflow=self.app_config.use_siliconflow,
+                siliconflow_token=self.app_config.siliconflow_token,
+                siliconflow_model=self.app_config.siliconflow_model,
+                siliconflow_prompt=self.app_config.siliconflow_prompt,
+            )
+        except RecognitionAPIError as exc:
+            if local_result and local_result.reason:
+                raise RecognitionAPIError(
+                    f"{local_result.reason}；云端回退失败: {exc}"
+                ) from exc
+            raise
         payload = self._merge_local_recognition_payload(document, payload, local_result)
         self._write_debug_payload(payload)
         return payload
@@ -1793,6 +1821,13 @@ class MainWindow(tk.Tk):
         document = files[0]
         if not document.exists():
             messagebox.showwarning("提示", f"文件不存在: {document}", parent=self)
+            return "break"
+        if not self._is_recognizable_file(document):
+            messagebox.showwarning(
+                "提示",
+                f"不支持识别该文件类型: {document.name}",
+                parent=self,
+            )
             return "break"
         if not self.ensure_level3_path():
             return "break"
@@ -2099,6 +2134,14 @@ class MainWindow(tk.Tk):
         if resolved.is_dir():
             return str(resolved)
         return None
+
+    @staticmethod
+    def _is_recognizable_file(path: Path) -> bool:
+        if not path.is_file():
+            return False
+        if path.name.startswith("."):
+            return False
+        return path.suffix.lower() in RECOGNITION_FILE_SUFFIXES
 
     def _confirm_public_card(self, doc_label: str) -> Optional[bool]:
         current = self.is_public_card_var.get()

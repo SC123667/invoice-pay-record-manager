@@ -180,14 +180,15 @@ class LocalRecognition:
 def recognize_local_document(path: Path) -> LocalRecognition:
     text = ""
     engine = ""
+    ocr_error: Optional[str] = None
     if path.suffix.lower() == ".pdf":
         text = extract_pdf_text(path)
         engine = "pdf_text"
         if not text:
-            text = recognize_with_paddle(path)
+            text, ocr_error = recognize_with_paddle(path)
             engine = "paddleocr_pdf"
     else:
-        text = recognize_with_paddle(path)
+        text, ocr_error = recognize_with_paddle(path)
         engine = "paddleocr"
 
     if not text:
@@ -196,7 +197,7 @@ def recognize_local_document(path: Path) -> LocalRecognition:
             text="",
             engine=engine or "local",
             usable=False,
-            reason="本地 OCR 未获取到文字",
+            reason=ocr_error or "本地 OCR 未获取到文字",
         )
 
     parsed = parse_local_text(text)
@@ -235,7 +236,7 @@ def extract_pdf_text(path: Path) -> str:
     return "\n".join(parts).strip()
 
 
-def recognize_with_paddle(path: Path) -> str:
+def recognize_with_paddle(path: Path) -> Tuple[str, Optional[str]]:
     try:
         image_path = _prepare_ocr_image(path)
         ocr = _get_paddle_ocr()
@@ -243,9 +244,11 @@ def recognize_with_paddle(path: Path) -> str:
             result = ocr.ocr(str(image_path), cls=True)
         except TypeError:
             result = ocr.ocr(str(image_path))
-        return "\n".join(_iter_paddle_text(result)).strip()
-    except Exception:
-        return ""
+        return "\n".join(_iter_paddle_text(result)).strip(), None
+    except ImportError:
+        return "", "本地 OCR 需要安装 PaddleOCR/PaddlePaddle"
+    except Exception as exc:
+        return "", f"本地 OCR 识别失败: {exc}"
     finally:
         if path.suffix.lower() == ".pdf":
             try:

@@ -48,6 +48,7 @@ _KEYWORD_PRIORITY = {
 _KEY_FIELDS = ("key", "name", "label", "field", "title")
 _VALUE_FIELDS = ("value", "text", "content", "word", "words", "val")
 _SILICONFLOW_URL = "https://api.siliconflow.cn/v1/chat/completions"
+_RETRYABLE_STATUS_CODES = {429, 503, 504}
 _DEFAULT_SF_MODEL = DEFAULT_SILICONFLOW_MODEL
 _DEFAULT_SF_PROMPT = (
     "你是报销票据分类与结构化识别助手。请先判断图片/文档到底是“发票”还是“支付凭证”，"
@@ -274,18 +275,26 @@ def call_recognition_api(
         data=payload,
     )
 
-    try:
-        with path.open("rb") as file_handle:
-            files = {"file": file_handle}
-            response = requests.post(
-                endpoint,
-                data=payload,
-                files=files,
-                headers=headers,
-                timeout=timeout,
-            )
-    except requests.RequestException as exc:  # type: ignore[attr-defined]
-        raise RecognitionAPIError(f"识别请求失败: {exc}") from exc
+    response = None
+    for attempt in range(3):
+        try:
+            with path.open("rb") as file_handle:
+                files = {"file": file_handle}
+                response = requests.post(
+                    endpoint,
+                    data=payload,
+                    files=files,
+                    headers=headers,
+                    timeout=timeout,
+                )
+        except requests.RequestException as exc:  # type: ignore[attr-defined]
+            raise RecognitionAPIError(f"识别请求失败: {exc}") from exc
+        if response.status_code not in _RETRYABLE_STATUS_CODES or attempt >= 2:
+            break
+        time.sleep(_retry_delay_seconds(response.text, attempt))
+
+    if response is None:
+        raise RecognitionAPIError("识别请求未返回结果")
 
     if response.status_code != 200:
         snippet = response.text[:200]
@@ -298,6 +307,24 @@ def call_recognition_api(
     except ValueError as exc:
         raise RecognitionAPIError("识别结果不是有效的JSON格式") from exc
     return result
+
+
+def _retry_delay_seconds(response_text: str, attempt: int) -> float:
+    try:
+        payload = json.loads(response_text)
+    except ValueError:
+        payload = {}
+    wait_time = None
+    if isinstance(payload, Mapping):
+        err_info = payload.get("err_info")
+        if isinstance(err_info, Mapping):
+            wait_time = err_info.get("waitTime")
+    try:
+        suggested = float(wait_time) if wait_time is not None else 0.0
+    except (TypeError, ValueError):
+        suggested = 0.0
+    backoff = 1.0 + attempt * 1.5 + random.random() * 0.5
+    return max(suggested, backoff)
 
 
 def _call_siliconflow_recognition(
